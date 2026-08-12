@@ -1,106 +1,36 @@
 /*
-  Cyberdeck Music Player
-  Arduino Uno R4 + DFPlayer Mini + speaker + IR remote + built-in 12x8
-  LED matrix + sound sensor + RGB LED + round GC9A01 display
+  Cyberdeck Music Player — ESP32 DevKit V1
+  DFPlayer Mini + IR remote + HT16K33 8x8 + GC9A01 round TFT
 
-  Round display (CD disc theme on GC9A01 240x240):
-    - Smooth rainbow CD diffraction fill + faint groove rings (not foil)
-    - Dual thin black outer rings; thick black hub with spindle hole
-    - Hub: white EQ preset text only (Normal/Pop/Rock/Jazz/Classic/Bass)
-      — no bar/synth icons
-    - Marker-style track title (top) + album (under); wide-spaced tech
-      stacked TRACK/NN left and VOL right (CD-RW label feel)
-    - Long track titles marquee-scroll in a clipped window (album stays
-      static/truncated). Title-band only redraw — no full-CD flicker.
-    - Sleep: muted (dimmed) rainbow CD with no labels; soft power-off
-      also pauses audio until wake.
-    - Stats (USB/SCAN): rainbow CD + hub; top track above, top album
-      below; PLAYS/TIME as side stacks; top artist in the footer.
-      EEPROM-backed; survives power-off. Music keeps playing.
-    - Bottom: PREV: / NEXT: names above two tapered black rules
-    - Full screen redraw on track/volume/EQ/mute change — Uno R4 lacks
-      RAM for a 240x240 framebuffer, so brief flicker on redraw is
-      expected. Album names come from the mp3 naming; track 33 is a
-      placeholder gap on the card.
-
-  The IR remote is the entire physical interface now. The joystick, the
-  6-button analog ladder, the standalone Play/Pause button, and the
-  rotary encoder were all removed after persistent flaky-connection
-  issues - nothing functional was lost, since the remote already covers
-  every one of those functions directly (including digit-based track
-  selection, which replaces what the joystick's browsing mode used to do).
-
-  LED matrix behavior:
-    - Spectrum-only: 12 solid bars driven by the A4 sound sensor while
-      playing (Beatbox-style analyzer on the mono 12x8 matrix — no color
-      gradient on this hardware). Blank while paused / asleep.
-    - No pause icon, volume bar, or track-number overlays on the matrix.
-
-  RGB LED mood lighting: color matches current EQ preset, brightness
-  pulses with the sound level, off while paused.
-
-  Controls (remote - the only physical input now):
-    0-9         type a 1 or 2 digit track number (auto-plays after ~1s pause)
-    PLAY/PAUSE  play/pause
-    PREV/NEXT   previous/next track (hold to keep stepping)
-    VOL- / VOL+ volume (hold to keep adjusting)
-    MUTE        toggle mute
-    MODE        toggle Shuffle (does not jump tracks — current song
-                keeps playing; NEXT label shows the pre-picked random
-                upcoming track. Next and auto-advance-on-finish use that
-                pick. Repeat takes priority if both are on. Default play
-                is sequential through the list.)
-    ⇄ (repeat)  toggle Repeat
-    EQ          cycle EQ preset
-    POWER       soft power-off / wake — muted rainbow CD (no labels),
-                RGB + matrix + audio off; press again to wake and resume
-                if it was playing. While asleep only POWER works.
-    USB/SCAN    toggle stats page (top track/album, plays, listen time).
-                Music and visualizer keep going; press again for CD face.
+  Controls: 0-9 track entry, PLAY/PAUSE, PREV/NEXT, VOL-/+, MUTE,
+  MODE shuffle, repeat, EQ, POWER sleep, USB/SCAN stats.
 
   Wiring:
-    DFPlayer VCC/GND -> external 5V supply (NOT Arduino 5V), shared ground
-      with Arduino. 100uF + 0.1uF ceramic across VCC/GND at the DFPlayer pins.
-    DFPlayer TX  -> Arduino D0  (RX1, hardware serial - R4 only)
-    DFPlayer RX  -> 1k resistor -> Arduino D1 (TX1)
-    DFPlayer SPK1/SPK2 -> speaker
+    DFPlayer 5V/GND, TX->1k->D16, RX<-1k<-D17, SPK1/SPK2->speaker
+    IR OUT->D27
+    GC9A01 3V3: SCL D18, SDA(MOSI) D23, CS D5, DC D19, RST D4 (BL->3V3)
+    8x8 5V: SDA D21, SCL D22 (DIP all OFF = I2C 0x70)
 
-    IR receiver: VCC -> 5V, GND -> GND, OUT -> D9
-
-    Sound sensor: VCC -> 5V, GND -> GND, AOUT -> A4
-    RGB LED module: R -> D3, G -> D5, B -> D6, GND -> GND
-      (if colors look inverted, swap each analogWrite value to 255-value)
-      (D3 is free again now that the standalone Play/Pause button is gone)
-
-    LED matrix: built into the board, no wiring needed.
-
-    Round display (GC9A01): VCC -> 3.3V (check silkscreen before trying
-      5V), GND -> GND, SCL/SCK -> D13, SDA/MOSI -> D11, RES/RST -> A3,
-      DC -> D2, CS -> D10
-
-    D4, D7, D8, D12, A0, A1, A2, A5 all free now too.
-
-  SD card setup: folder named "mp3" at the root, files named 0001.mp3,
-  0002.mp3 ... 9999.mp3 (extra text after the 4 digits is fine).
-  On macOS: run `dot_clean /Volumes/YourCardName` if playback seems off.
-
-  Libraries needed (Library Manager): DFRobotDFPlayerMini, IRremote (v4.x,
-  by Armin Joachimsmeyer), GFX Library for Arduino (by moononournation).
-  Arduino_LED_Matrix ships with the Uno R4 board core - no separate
-  install, and ArduinoGraphics is NOT needed.
+  Libs: DFRobotDFPlayerMini, IRremote v4, Arduino_GFX
 */
 
 #include <DFRobotDFPlayerMini.h>
 #include <IRremote.hpp>
-#include "Arduino_LED_Matrix.h"
 #include <Arduino_GFX_Library.h>
-#include <EEPROM.h>
+#include <Wire.h>
+#include <Preferences.h>
 #include <string.h>
 #include <math.h>
 
-const int IR_RECEIVE_PIN = 9;
+const int IR_RECEIVE_PIN = 27;
+const int TFT_CS = 5;
+const int TFT_DC = 19;
+const int TFT_RST = 4;
+const int MATRIX_SDA = 21;
+const int MATRIX_SCL = 22;
+uint8_t MATRIX_I2C_ADDR = 0x70; // DIP A0/A1/A2; all OFF = 0x70
+const int NUM_COLS = 8;
 
-// Button codes identified from this specific remote via the code-finder sketch
 #define IR_0          0xE916FF00
 #define IR_1          0xF30CFF00
 #define IR_2          0xE718FF00
@@ -133,13 +63,11 @@ bool sleepMode = false;
 bool wasPlayingBeforeSleep = false;
 bool statsMode = false;
 int currentTrack = 1;
-int shuffleNextTrack = 1; // pre-picked upcoming track while shuffle is on
-int currentEQ = 0; // index into eqNames/eqValues below
+int shuffleNextTrack = 1;
+int currentEQ = 0;
 
-// ---- Persistent listening stats (EEPROM) ----
 const uint8_t STATS_MAGIC = 0xCD;
 const uint8_t STATS_VERSION = 1;
-const int STATS_EEPROM_ADDR = 0;
 const unsigned long LISTEN_FLUSH_MS = 60000;
 
 struct StatsStore {
@@ -150,19 +78,19 @@ struct StatsStore {
 };
 
 StatsStore stats;
+Preferences statsPrefs;
 unsigned long listenSecondMarkMs = 0;
 unsigned long lastListenFlushMs = 0;
 bool listenTimeDirty = false;
 
-// IR hold-to-repeat for PREV/NEXT/VOL (NEC repeat frames)
 enum IrHoldAction { IR_HOLD_NONE, IR_HOLD_PREV, IR_HOLD_NEXT, IR_HOLD_VOL_DOWN, IR_HOLD_VOL_UP };
 IrHoldAction lastIrHoldAction = IR_HOLD_NONE;
 unsigned long lastIrRepeatMs = 0;
-unsigned long irHoldStartMs = 0; // when the key was first pressed
-const unsigned long IR_HOLD_INITIAL_MS = 550; // ignore NEC repeats until held this long
-const unsigned long IR_HOLD_TRACK_MS = 400;   // then step tracks at this pace
+unsigned long irHoldStartMs = 0;
+const unsigned long IR_HOLD_INITIAL_MS = 550;
+const unsigned long IR_HOLD_TRACK_MS = 400;
 const unsigned long IR_HOLD_VOL_MS = 140;
-const unsigned long IR_FRESH_DEBOUNCE_MS = 280; // ignore duplicate "fresh" decodes of one tap
+const unsigned long IR_FRESH_DEBOUNCE_MS = 280;
 unsigned long lastFreshIrMs = 0;
 unsigned long lastFreshIrCode = 0;
 
@@ -173,44 +101,19 @@ const uint8_t eqValues[] = {
 };
 const int totalEQs = 6;
 
-// RGB color per EQ preset (0-255 each), mood-lighting ties to whichever
-// preset is active
-const uint8_t eqColors[6][3] = {
-  {255, 255, 255}, // Normal - white
-  {255, 60, 180},  // Pop - pink
-  {255, 40, 20},   // Rock - red/orange
-  {150, 60, 220},  // Jazz - purple
-  {60, 100, 255},  // Classic - blue
-  {255, 20, 20}    // Bass - deep red
-};
-
-// ---- Sound sensor, RGB LED ----
-const int SOUND_PIN = A4;
-
-// Real A4 mic module. Set false only for desk testing without the sensor
-// (falls back to a synthetic envelope — not song-reactive).
-const bool USE_REAL_SOUND_SENSOR = true;
-const int RGB_R_PIN = 3;
-const int RGB_G_PIN = 5;
-const int RGB_B_PIN = 6;
-
-int soundBaseline = 512;  // recalibrated in setup()
-const float BAR_ATTACK = 0.40f;  // ease up — no instant blink to new height
-const float BAR_DECAY = 0.88f;   // slow fall so neighbor gaps stay visible
-const float CAP_DECAY = 0.96f;   // caps hang longer
-const int SOUND_MAX = 200;       // base sensitivity; AGC adapts on top
-const int SAMPLES_PER_COL = 8;   // ADC reads per column window each frame
-const float AGC_FLOOR = 35.0f;   // don't over-amplify silence
-const float AGC_ATTACK = 0.12f;  // slower — avoid slamming everything to full
+// Synthetic 8x8 spectrum
+const float BAR_ATTACK = 0.40f;
+const float BAR_DECAY = 0.88f;
+const float CAP_DECAY = 0.96f;
+const int SOUND_MAX = 800;
+const float AGC_FLOOR = 50.0f;
+const float AGC_ATTACK = 0.12f;
 const float AGC_RELEASE = 0.04f;
-const float CONTRAST = 3.2f;     // strong neighbor height differences
-const float GATE = 0.12f;        // normalized noise gate (quiet = empty)
-const unsigned long VIS_FRAME_MS = 90; // ~11 fps — readable, not strobing
+const float CONTRAST = 3.2f;
+const float GATE = 0.12f;
+const unsigned long VIS_FRAME_MS = 90;
 
-// Filenames on the SD card ("mp3" folder) are numbered to match these
-// indices, e.g. 0001_carpet_bed_growing_pains.mp3 -> track 1. File 0033
-// doesn't exist (gap in the source recordings), so index 33 is a
-// placeholder - the DFPlayer will just no-op if that track is selected.
+// SD mp3/0001.mp3 … — track 33 is a missing gap
 const char* trackNames[] = {
   "Growing Pains", "Dog Days", "Misuse, Oh", "Antlers",                                    // 1-4   Carpet Bed
   "Sunday Morning", "Casings", "Lilies", "Head in the Wall", "Knuckle Velvet",              // 5-9   Golden Age
@@ -260,7 +163,6 @@ const char* albumNames[] = {
   "Willoughby Tucker, I'll Always Love You", "Willoughby Tucker, I'll Always Love You", "Willoughby Tucker, I'll Always Love You", "Willoughby Tucker, I'll Always Love You", "Willoughby Tucker, I'll Always Love You" // 73-77
 };
 
-// Parallel artist credits (this library is all Ethel Cain — top artist is the bit)
 const char* artistNames[] = {
   "Ethel Cain", "Ethel Cain", "Ethel Cain", "Ethel Cain",                                    // 1-4
   "Ethel Cain", "Ethel Cain", "Ethel Cain", "Ethel Cain", "Ethel Cain",                      // 5-9
@@ -285,14 +187,11 @@ const char* artistNames[] = {
   "Ethel Cain", "Ethel Cain", "Ethel Cain", "Ethel Cain", "Ethel Cain"                         // 73-77
 };
 
-// ---- Round display (GC9A01, 240x240) ----
-#define TFT_CS   10
-#define TFT_DC   2
-#define TFT_RST  A3
-Arduino_DataBus *displayBus = new Arduino_HWSPI(TFT_DC, TFT_CS);
+// MISO unused so DC can stay on GPIO19 (VSPI default MISO)
+Arduino_DataBus *displayBus = new Arduino_HWSPI(
+  TFT_DC, TFT_CS, 18 /* SCK */, 23 /* MOSI */, GFX_NOT_DEFINED /* MISO */);
 Arduino_GFX *gfx = new Arduino_GC9A01(displayBus, TFT_RST, 0, true);
 
-// RGB565 color macro - converts standard 0-255 RGB to the display's format
 #define RGB565(r, g, b) ((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3))
 #define COLOR_BLACK     RGB565(0, 0, 0)
 #define COLOR_WHITE     RGB565(255, 255, 255)
@@ -302,19 +201,17 @@ Arduino_GFX *gfx = new Arduino_GC9A01(displayBus, TFT_RST, 0, true);
 const int DISP_CX = 120;
 const int DISP_CY = 120;
 
-// CD face geometry (GC9A01 240x240)
 const int CD_R_OUTER = 118;
 const int CD_R_OUTER2 = 114;
 const int CD_R_FACE = 112;
 const int CD_R_HUB = 38;
 const int CD_R_HOLE = 14;
-const int CD_R_EQ = 27; // radius for hub EQ character placement
+const int CD_R_EQ = 27;
 
-// Track title marquee (Spotify-style clip scroll; album stays static)
 const int TITLE_Y = 48;
 const int TITLE_TEXT_SIZE = 2;
 const int TITLE_MAX_W = 150;
-const int TITLE_CLIP_X = DISP_CX - TITLE_MAX_W / 2; // 45
+const int TITLE_CLIP_X = DISP_CX - TITLE_MAX_W / 2;
 const int TITLE_CHAR_H = 8 * TITLE_TEXT_SIZE;
 const unsigned long MARQUEE_PAUSE_MS = 1200;
 const unsigned long MARQUEE_STEP_MS = 50;
@@ -324,65 +221,106 @@ int titleScrollPx = 0;
 int marqueePhase = MARQUEE_PAUSE_START;
 unsigned long marqueePhaseStart = 0;
 
-// ---- Track number entry buffer (type digits, auto-confirms after a pause) ----
 char entryBuffer[4] = "";
 byte entryLen = 0;
 unsigned long lastDigitTime = 0;
 const unsigned long AUTO_CONFIRM_MS = 1000;
 
-// ---- LED matrix ----
-ArduinoLEDMatrix matrix;
-bool matrixBlanked = false; // true after we cleared for pause/sleep
+bool matrixBlanked = false;
+bool matrixPresent = false;
+
+void ht16Cmd(uint8_t cmd) {
+  Wire.beginTransmission(MATRIX_I2C_ADDR);
+  Wire.write(cmd);
+  Wire.endTransmission();
+}
+
+uint8_t probeHt16Address() {
+  for (uint8_t addr = 0x70; addr <= 0x77; addr++) {
+    Wire.beginTransmission(addr);
+    if (Wire.endTransmission() == 0) {
+      return addr;
+    }
+  }
+  return 0;
+}
+
+void matrixTestPattern() {
+  uint8_t bitmap[8][NUM_COLS];
+  for (int row = 0; row < 8; row++) {
+    for (int col = 0; col < NUM_COLS; col++) bitmap[row][col] = 1;
+  }
+  drawBitmap(bitmap);
+  delay(400);
+  clearMatrix();
+}
+
+void matrixBegin() {
+  Wire.begin(MATRIX_SDA, MATRIX_SCL);
+  Wire.setClock(100000);
+  delay(20);
+
+  uint8_t found = probeHt16Address();
+  if (found == 0) {
+    matrixPresent = false;
+    Serial.println("8x8 matrix not found (check 5V, D21/D22, DIP).");
+    return;
+  }
+
+  MATRIX_I2C_ADDR = found;
+  matrixPresent = true;
+  Serial.print("8x8 matrix at 0x");
+  Serial.println(MATRIX_I2C_ADDR, HEX);
+
+  ht16Cmd(0x21); // oscillator on
+  ht16Cmd(0x81); // display on
+  ht16Cmd(0xEF); // max brightness
+  matrixTestPattern();
+}
 
 void setup() {
   Serial.begin(115200);
-  Serial1.begin(9600);
+  delay(200);
+  Serial2.begin(9600, SERIAL_8N1, 16, 17);
 
   IrReceiver.begin(IR_RECEIVE_PIN, ENABLE_LED_FEEDBACK);
 
-  matrix.begin();
+  matrixBegin();
   randomSeed(millis());
 
   if (!gfx->begin()) {
-    Serial.println("Display init failed - check wiring!");
+    Serial.println("Display init failed.");
   } else {
     gfx->fillScreen(COLOR_BLACK);
   }
 
-  pinMode(RGB_R_PIN, OUTPUT);
-  pinMode(RGB_G_PIN, OUTPUT);
-  pinMode(RGB_B_PIN, OUTPUT);
-
-  // Quick baseline calibration - assumes it's quiet at boot (nothing
-  // playing yet), averages some samples to find the sensor's resting level.
-  // Skipped entirely if the real sensor isn't wired up.
-  if (USE_REAL_SOUND_SENSOR) {
-    long sum = 0;
-    for (int i = 0; i < 50; i++) {
-      sum += analogRead(SOUND_PIN);
-      delay(2);
-    }
-    soundBaseline = sum / 50;
-    Serial.print("Sound sensor baseline: ");
-    Serial.println(soundBaseline);
-  } else {
-    Serial.println("Sound sensor not wired - using synthetic visualizer.");
-  }
-
   Serial.println("Initializing DFPlayer...");
-  if (!dfPlayer.begin(Serial1)) {
-    Serial.println("DFPlayer not found. Check wiring and SD card.");
+  delay(1500); // let DFPlayer finish its own boot/SD mount before we talk to it
+
+  bool dfPlayerReady = false;
+  for (int attempt = 1; attempt <= 5 && !dfPlayerReady; attempt++) {
+    if (dfPlayer.begin(Serial2)) {
+      dfPlayerReady = true;
+    } else {
+      Serial.print("DFPlayer not found, attempt ");
+      Serial.println(attempt);
+      delay(1000);
+    }
+  }
+  if (!dfPlayerReady) {
+    Serial.println("DFPlayer not found after retries.");
     while (true) delay(1000);
   }
+
   dfPlayer.volume(currentVolume);
-  // Brief settle so the first playMp3Folder after begin() is reliable
-  // (cold PREV/play right after boot was otherwise flaky).
-  delay(300);
+  delay(1000); // cold-boot settle before first play
   Serial.println("Ready.");
   loadStats();
   listenSecondMarkMs = millis();
   lastListenFlushMs = millis();
   playTrack(1);
+  delay(200);
+  dfPlayer.playMp3Folder(currentTrack); // first play often ignored cold
 }
 
 void loop() {
@@ -402,7 +340,6 @@ void handleIR() {
                   (IrReceiver.decodedIRData.flags & IRDATA_FLAGS_IS_REPEAT);
   IrReceiver.resume();
 
-  // Sleep lockout: consume every code, but only POWER can wake.
   if (sleepMode) {
     if (!isRepeat && code == IR_POWER) {
       exitSleep();
@@ -410,9 +347,6 @@ void handleIR() {
     return;
   }
 
-  // NEC hold frames: scrub only PREV/NEXT/VOL while the matching key is held.
-  // Require an initial hold before the first repeat so a quick tap can't
-  // double-skip (full CD redraw often outlasts the first NEC repeat gap).
   if (isRepeat) {
     if (lastIrHoldAction == IR_HOLD_NONE) return;
     if (millis() - irHoldStartMs < IR_HOLD_INITIAL_MS) return;
@@ -428,21 +362,18 @@ void handleIR() {
       case IR_HOLD_VOL_UP: changeVolume(1); break;
       default: break;
     }
-    // Stamp after the action so a slow display redraw doesn't eat the gap
     lastIrRepeatMs = millis();
     return;
   }
 
-  if (code == 0) return; // garbage with no usable code
+  if (code == 0) return;
 
-  // Duplicate fresh decode of the same tap (common with some remotes)
   if ((code == IR_PREV || code == IR_NEXT || code == IR_VOL_DOWN || code == IR_VOL_UP) &&
       code == lastFreshIrCode &&
       (millis() - lastFreshIrMs) < IR_FRESH_DEBOUNCE_MS) {
     return;
   }
 
-  // Fresh press: only these four keys arm hold-repeat.
   lastIrHoldAction = IR_HOLD_NONE;
 
   switch (code) {
@@ -499,7 +430,6 @@ void handleIR() {
     case IR_MODE: {
       shuffleOn = !shuffleOn;
       Serial.println(shuffleOn ? "Shuffle ON" : "Shuffle OFF");
-      // Stay on the current song; preview the upcoming pick on the NEXT label.
       if (shuffleOn) {
         pickShuffleNext();
       }
@@ -528,7 +458,7 @@ void handleIR() {
 }
 
 void clearMatrix() {
-  uint8_t blank[8][12];
+  uint8_t blank[8][NUM_COLS];
   memset(blank, 0, sizeof(blank));
   drawBitmap(blank);
   matrixBlanked = true;
@@ -544,7 +474,6 @@ void enterSleep() {
     isPlaying = false;
   }
   lastIrHoldAction = IR_HOLD_NONE;
-  setRGBColor(0, 0, 0, 0);
   clearMatrix();
   drawSleepCdFace();
   Serial.println("Sleep");
@@ -572,8 +501,6 @@ void enterDigit(char digit) {
   lastDigitTime = millis();
 }
 
-// Plays the entered track number once ~1 second has passed with no new
-// digit press, so no separate "confirm" button is needed.
 void handleAutoConfirm() {
   if (entryLen == 0) return;
   if (millis() - lastDigitTime < AUTO_CONFIRM_MS) return;
@@ -588,41 +515,37 @@ void handleAutoConfirm() {
   entryBuffer[0] = '\0';
 }
 
-// Watches for the DFPlayer's "finished playing" event. Repeat replays
-// the same track; otherwise advance (sequential by default, shuffle-aware).
 void handleDFPlayerEvents() {
-  if (sleepMode) return; // soft-off: ignore finish events while paused for sleep
+  if (sleepMode) return;
   if (!dfPlayer.available()) return;
 
   uint8_t type = dfPlayer.readType();
   if (type == DFPlayerPlayFinished) {
-    // Count this completion even if Repeat will play the same track again
     recordTrackFinished(currentTrack);
     isPlaying = false;
     if (repeatOn) {
-      playTrack(currentTrack); // repeat takes priority over shuffle
+      playTrack(currentTrack);
     } else {
-      nextTrack(); // sequential, or random when shuffle is on
+      nextTrack();
     }
   }
 }
 
 void playTrack(int n) {
   currentTrack = n;
+  muted = false;
+  dfPlayer.volume(currentVolume);
   dfPlayer.playMp3Folder(n);
   isPlaying = true;
-  muted = false;
   if (shuffleOn) {
     pickShuffleNext();
   }
   printNowPlaying();
-  // While asleep, keep the dim CD face — don't flash matrix or full UI.
   if (sleepMode) return;
   resetTitleMarquee();
   updateDisplay();
 }
 
-// Pick a random upcoming track for shuffle preview / next advance.
 void pickShuffleNext() {
   do {
     shuffleNextTrack = random(1, totalTracks + 1);
@@ -631,7 +554,6 @@ void pickShuffleNext() {
 
 void nextTrack() {
   if (shuffleOn) {
-    // Use the pre-picked track shown on the NEXT label
     if (shuffleNextTrack < 1 || shuffleNextTrack > totalTracks ||
         shuffleNextTrack == 33 || shuffleNextTrack == currentTrack) {
       pickShuffleNext();
@@ -679,7 +601,6 @@ void printNowPlaying() {
   Serial.println(trackNames[currentTrack - 1]);
 }
 
-// ---------------- Persistent stats (EEPROM) ----------------
 
 void clearStatsRam() {
   memset(&stats, 0, sizeof(stats));
@@ -687,12 +608,28 @@ void clearStatsRam() {
   stats.version = STATS_VERSION;
 }
 
+void saveStatsBlob() {
+  stats.magic = STATS_MAGIC;
+  stats.version = STATS_VERSION;
+  statsPrefs.putBytes("blob", &stats, sizeof(stats));
+  listenTimeDirty = false;
+  lastListenFlushMs = millis();
+}
+
 void loadStats() {
-  EEPROM.get(STATS_EEPROM_ADDR, stats);
+  if (!statsPrefs.begin("cyberdeck", false)) {
+    Serial.println("Stats: Preferences begin failed");
+  }
+  size_t len = statsPrefs.getBytesLength("blob");
+  if (len == sizeof(stats)) {
+    statsPrefs.getBytes("blob", &stats, sizeof(stats));
+  } else {
+    clearStatsRam();
+  }
   if (stats.magic != STATS_MAGIC || stats.version != STATS_VERSION) {
     clearStatsRam();
-    EEPROM.put(STATS_EEPROM_ADDR, stats);
-    Serial.println("Stats: EEPROM initialized");
+    saveStatsBlob();
+    Serial.println("Stats: NVS initialized");
   } else {
     Serial.print("Stats: loaded, listens=");
     Serial.println(stats.listenSeconds);
@@ -701,11 +638,7 @@ void loadStats() {
 
 void flushListenTime(bool force) {
   if (!force && !listenTimeDirty) return;
-  stats.magic = STATS_MAGIC;
-  stats.version = STATS_VERSION;
-  EEPROM.put(STATS_EEPROM_ADDR, stats);
-  listenTimeDirty = false;
-  lastListenFlushMs = millis();
+  saveStatsBlob();
 }
 
 void updateListenTime() {
@@ -731,11 +664,7 @@ void recordTrackFinished(int n) {
   if (stats.trackPlays[n - 1] < 65535u) {
     stats.trackPlays[n - 1]++;
   }
-  stats.magic = STATS_MAGIC;
-  stats.version = STATS_VERSION;
-  EEPROM.put(STATS_EEPROM_ADDR, stats);
-  listenTimeDirty = false;
-  lastListenFlushMs = millis();
+  saveStatsBlob();
   Serial.print("Stats: track ");
   Serial.print(n);
   Serial.print(" plays=");
@@ -765,7 +694,6 @@ uint32_t totalPlayCount() {
   return t;
 }
 
-// Returns 0-based track index of most-played, or -1 if none.
 int topTrackIndex() {
   int best = -1;
   uint16_t bestC = 0;
@@ -843,7 +771,6 @@ void formatListenTime(char* buf, int bufSize) {
   uint32_t s = stats.listenSeconds;
   uint32_t h = s / 3600UL;
   uint32_t m = (s % 3600UL) / 60UL;
-  // Compact for the side tech stack (TRACK/VOL style)
   if (h > 0) {
     snprintf(buf, bufSize, "%luh%lum", (unsigned long)h, (unsigned long)m);
   } else {
@@ -851,40 +778,27 @@ void formatListenTime(char* buf, int bufSize) {
   }
 }
 
-// ---------------- LED matrix helpers ----------------
-
-// Converts our readable uint8_t[8][12] bitmap (1 = lit pixel) into the
-// packed uint32_t[3] format loadFrame() actually expects: 96 bits total,
-// row-major, MSB-first, split across 3 words.
-void bitmapToFrame(const uint8_t bitmap[8][12], uint32_t frame[3]) {
-  frame[0] = frame[1] = frame[2] = 0;
-  int bitIndex = 0;
+void drawBitmap(const uint8_t bitmap[8][NUM_COLS]) {
+  Wire.beginTransmission(MATRIX_I2C_ADDR);
+  Wire.write((uint8_t)0x00);
   for (int row = 0; row < 8; row++) {
-    for (int col = 0; col < 12; col++) {
+    uint8_t bits = 0;
+    for (int col = 0; col < NUM_COLS; col++) {
       if (bitmap[row][col]) {
-        int wordIndex = bitIndex / 32;
-        int bitInWord = 31 - (bitIndex % 32);
-        frame[wordIndex] |= (1UL << bitInWord);
+        bits |= (1 << col);
       }
-      bitIndex++;
     }
+    Wire.write(bits);
+    Wire.write((uint8_t)0x00);
   }
+  Wire.endTransmission();
 }
 
-void drawBitmap(const uint8_t bitmap[8][12]) {
-  uint32_t frame[3];
-  bitmapToFrame(bitmap, frame);
-  matrix.loadFrame(frame);
-}
-
-// ---------------- Audio-reactive visualizer + mood lighting ----------------
-
-float columnBars[12] = {0};
-float columnCaps[12] = {0};
+float columnBars[NUM_COLS] = {0};
+float columnCaps[NUM_COLS] = {0};
 float agcCeiling = 120.0f;
 unsigned long lastVisFrameMs = 0;
 
-// Synthetic envelope for desk testing without a mic (not song-reactive).
 float getSyntheticEnvelope() {
   unsigned long t = millis();
   float wave1 = sin(t * 0.003) * 0.5 + 0.5;
@@ -893,47 +807,32 @@ float getSyntheticEnvelope() {
   return constrain(wave1 + wave2 + noise, 0.0, 1.0) * SOUND_MAX;
 }
 
-// Raw column energies from successive ADC windows (or synthetic).
-float sampleColumnLevels(float levels[12]) {
+float sampleColumnLevels(float levels[NUM_COLS]) {
+  float env = getSyntheticEnvelope();
   float overall = 0;
-  if (USE_REAL_SOUND_SENSOR) {
-    for (int col = 0; col < 12; col++) {
-      long sum = 0;
-      for (int i = 0; i < SAMPLES_PER_COL; i++) {
-        sum += abs(analogRead(SOUND_PIN) - soundBaseline);
-      }
-      levels[col] = (float)sum / (float)SAMPLES_PER_COL;
-      overall += levels[col];
-    }
-  } else {
-    float env = getSyntheticEnvelope();
-    for (int col = 0; col < 12; col++) {
-      float j = 0.55f + 0.45f * (random(0, 100) / 100.0f);
-      levels[col] = env * j;
-      overall += levels[col];
-    }
+  for (int col = 0; col < NUM_COLS; col++) {
+    float j = 0.55f + 0.45f * (random(0, 100) / 100.0f);
+    levels[col] = env * j;
+    overall += levels[col];
   }
-  return overall / 12.0f;
+  return overall / (float)NUM_COLS;
 }
 
-// Mid-fill EQ silhouette: strong neighbor contrast, peaks hit the top only
-// on real hits — not a solid wall of LEDs.
-void stylizeSpectrum(float levels[12]) {
-  // Light neighbor blend (heavy blur kills the contrast we want)
-  float smooth[12];
-  for (int i = 0; i < 12; i++) {
+void stylizeSpectrum(float levels[NUM_COLS]) {
+  float smooth[NUM_COLS];
+  for (int i = 0; i < NUM_COLS; i++) {
     float left = levels[i > 0 ? i - 1 : i];
-    float right = levels[i < 11 ? i + 1 : i];
+    float right = levels[i < NUM_COLS - 1 ? i + 1 : i];
     smooth[i] = levels[i] * 0.75f + left * 0.125f + right * 0.125f;
   }
 
   float mx = AGC_FLOOR;
   float mean = 0;
-  for (int i = 0; i < 12; i++) {
+  for (int i = 0; i < NUM_COLS; i++) {
     if (smooth[i] > mx) mx = smooth[i];
     mean += smooth[i];
   }
-  mean /= 12.0f;
+  mean /= (float)NUM_COLS;
 
   if (mx > agcCeiling) {
     agcCeiling += (mx - agcCeiling) * AGC_ATTACK;
@@ -943,7 +842,7 @@ void stylizeSpectrum(float levels[12]) {
   if (agcCeiling < AGC_FLOOR) agcCeiling = AGC_FLOOR;
 
   float meanN = mean / agcCeiling;
-  for (int i = 0; i < 12; i++) {
+  for (int i = 0; i < NUM_COLS; i++) {
     float n = smooth[i] / agcCeiling;
     n = meanN + (n - meanN) * CONTRAST;
     if (n < GATE) {
@@ -953,10 +852,9 @@ void stylizeSpectrum(float levels[12]) {
       if (n < 0) n = 0;
       if (n > 1) n = 1;
       n = powf(n, 0.85f);
-      // Most music sits mid-matrix; only strong columns reach the top
       float rows = n * 6.5f;
       if (n > 0.85f) {
-        rows = 6.5f + (n - 0.85f) / 0.15f * 1.5f; // 6.5 .. 8
+        rows = 6.5f + (n - 0.85f) / 0.15f * 1.5f;
       }
       levels[i] = rows;
       continue;
@@ -966,8 +864,7 @@ void stylizeSpectrum(float levels[12]) {
 }
 
 void updateVisualizer() {
-  if (sleepMode) {
-    setRGBColor(0, 0, 0, 0);
+  if (sleepMode || !matrixPresent) {
     return;
   }
 
@@ -976,27 +873,25 @@ void updateVisualizer() {
       clearMatrix();
     }
     agcCeiling = 120.0f;
-    for (int i = 0; i < 12; i++) {
+    for (int i = 0; i < NUM_COLS; i++) {
       columnBars[i] = 0;
       columnCaps[i] = 0;
     }
-    setRGBColor(0, 0, 0, 0);
     return;
   }
 
-  // Cap redraw rate so the EQ morphs instead of strobing every loop
   unsigned long now = millis();
   if (now - lastVisFrameMs < VIS_FRAME_MS) return;
   lastVisFrameMs = now;
 
-  float levels[12];
-  float baseLevel = sampleColumnLevels(levels);
+  float levels[NUM_COLS];
+  sampleColumnLevels(levels);
   stylizeSpectrum(levels);
 
-  uint8_t bitmap[8][12];
+  uint8_t bitmap[8][NUM_COLS];
   memset(bitmap, 0, sizeof(bitmap));
 
-  for (int col = 0; col < 12; col++) {
+  for (int col = 0; col < NUM_COLS; col++) {
     float lvl = levels[col];
     if (lvl > columnBars[col]) {
       columnBars[col] += (lvl - columnBars[col]) * BAR_ATTACK;
@@ -1014,7 +909,6 @@ void updateVisualizer() {
       bitmap[row][col] = 1;
     }
 
-    // Floating peak tip with a gap — classic analyzer silhouette
     int capH = constrain((int)(columnCaps[col] + 0.5f), 0, 8);
     if (capH > filledRows + 1) {
       bitmap[8 - capH][col] = 1;
@@ -1025,25 +919,8 @@ void updateVisualizer() {
 
   drawBitmap(bitmap);
   matrixBlanked = false;
-
-  int clampedBase = constrain((int)baseLevel, 0, SOUND_MAX);
-  int soundBrightness = map(clampedBase, 0, SOUND_MAX, 50, 255);
-  float finalScale = soundBrightness / 255.0f;
-  setRGBColor(eqColors[currentEQ][0], eqColors[currentEQ][1],
-              eqColors[currentEQ][2], finalScale);
 }
 
-void setRGBColor(uint8_t r, uint8_t g, uint8_t b, float brightnessScale) {
-  analogWrite(RGB_R_PIN, (int)(r * brightnessScale));
-  analogWrite(RGB_G_PIN, (int)(g * brightnessScale));
-  analogWrite(RGB_B_PIN, (int)(b * brightnessScale));
-}
-
-// ---------------- Round display (CD disc) ----------------
-
-// ---- Round CD disc display helpers ----
-
-// Interpolate a smooth CD-style rainbow (cyan → blue → magenta → gold → green).
 uint16_t cdRainbowAt(float t) {
   if (t < 0) t = 0;
   if (t > 1) t = 1;
@@ -1066,7 +943,6 @@ uint16_t cdRainbowAt(float t) {
   return RGB565(r, g, b);
 }
 
-// Soft shine: brighten an RGB565 color slightly toward white.
 uint16_t brighten565(uint16_t c, float amount) {
   int r = ((c >> 11) & 0x1F) << 3;
   int g = ((c >> 5) & 0x3F) << 2;
@@ -1077,7 +953,6 @@ uint16_t brighten565(uint16_t c, float amount) {
   return RGB565(r, g, b);
 }
 
-// Darken for sleep-face muted rainbow.
 uint16_t dim565(uint16_t c, float amount) {
   int r = ((c >> 11) & 0x1F) << 3;
   int g = ((c >> 5) & 0x3F) << 2;
@@ -1089,13 +964,11 @@ uint16_t dim565(uint16_t c, float amount) {
 }
 
 void drawCdRainbowFillScaled(float dimAmount) {
-  // Finer wedges when dimmed so RGB565 steps look less blocky on sleep.
   const int step = (dimAmount < 1.0f) ? 2 : 3;
   for (int deg = 0; deg < 360; deg += step) {
     float a0 = deg * DEG_TO_RAD;
     float a1 = (deg + step) * DEG_TO_RAD;
     uint16_t c = cdRainbowAt(deg / 360.0f);
-    // Soft specular highlights: bottom-left + mirrored top-right
     if ((deg >= 200 && deg < 245) || (deg >= 20 && deg < 65)) {
       c = brighten565(c, 0.35f);
     }
@@ -1108,7 +981,6 @@ void drawCdRainbowFillScaled(float dimAmount) {
     int y2 = DISP_CY - (int)(cos(a1) * CD_R_FACE);
     gfx->fillTriangle(DISP_CX, DISP_CY, x1, y1, x2, y2, c);
   }
-  // Faint concentric grooves
   for (int r = 48; r < CD_R_FACE; r += 10) {
     gfx->drawCircle(DISP_CX, DISP_CY, r, COLOR_GROOVE);
   }
@@ -1124,8 +996,6 @@ void drawHubRing() {
   gfx->drawCircle(DISP_CX, DISP_CY, CD_R_HOLE, COLOR_BLACK);
 }
 
-// White EQ text on hub — EQ centered on top arc, preset centered on bottom.
-// Glyphs stay upright (GFX can't rotate chars); each arc is centered on its own.
 void drawHubEqChar(float angDeg, char ch) {
   float ang = angDeg * DEG_TO_RAD;
   int x = DISP_CX + (int)(sin(ang) * CD_R_EQ) - 3;
@@ -1145,12 +1015,9 @@ void drawHubEqText() {
   gfx->setTextColor(COLOR_WHITE);
   gfx->setTextSize(1);
 
-  // Top: "EQ" centered on angle 0
   drawHubEqChar(-charDeg / 2.0f, 'E');
   drawHubEqChar(charDeg / 2.0f, 'Q');
 
-  // Bottom: preset centered on angle 180, left-to-right
-  // (angles increase clockwise: left of bottom is 180+span/2, right is 180-span/2)
   int nameLen = (int)strlen(name);
   if (nameLen < 1) return;
   float span = (nameLen - 1) * charDeg;
@@ -1169,7 +1036,6 @@ void drawCdDiscBackground() {
   drawHubRing();
 }
 
-// Same CD rainbow as active UI (including light wedges), globally dimmed; no labels.
 void drawSleepCdFace() {
   gfx->fillScreen(COLOR_BLACK);
   drawCdRainbowFillScaled(0.55f);
@@ -1178,7 +1044,6 @@ void drawSleepCdFace() {
   drawHubRing();
 }
 
-// Default font ≈ 6px wide per char per textSize unit.
 int textPixelWidth(const char* text, int textSize) {
   return (int)strlen(text) * 6 * textSize;
 }
@@ -1203,7 +1068,6 @@ void drawCenteredText(const char* text, int y, int textSize, uint16_t color) {
   gfx->print(text);
 }
 
-// Centered label at a fixed text size, truncated to maxWidth.
 void drawSizedCentered(const char* text, int y, int textSize, int maxWidth, uint16_t color) {
   char buf[40];
   int maxChars = maxWidth / (6 * textSize);
@@ -1213,7 +1077,6 @@ void drawSizedCentered(const char* text, int y, int textSize, int maxWidth, uint
   drawCenteredText(buf, y, textSize, color);
 }
 
-// Wide-spaced tech label (CD-RW style), centered on cx. Fake-bold via 1px offset.
 void drawSpacedCentered(const char* text, int cx, int y, int textSize, int letterGap, uint16_t color) {
   int n = (int)strlen(text);
   if (n < 1) return;
@@ -1231,7 +1094,6 @@ void drawSpacedCentered(const char* text, int cx, int y, int textSize, int lette
   }
 }
 
-// Stacked TRACK/NN or VOL/value — same size, centered in left/right wedge.
 void drawStackedTechLabel(int cx, int cy, const char* line1, const char* line2) {
   const int textSize = 1;
   const int letterGap = 2;
@@ -1246,13 +1108,11 @@ void drawRuleWithLabelAbove(const char* label, int lineY, int lineWidth) {
   truncateToChars(label, buf, sizeof(buf), maxChars);
   drawCenteredText(buf, lineY - 12, 1, COLOR_BLACK);
   int x0 = DISP_CX - lineWidth / 2;
-  // 3px thick rule
   for (int t = 0; t < 3; t++) {
     gfx->drawFastHLine(x0, lineY + t, lineWidth, COLOR_BLACK);
   }
 }
 
-// Restore the rainbow CD face under the title clip window (cheap band redraw).
 void clearTitleBand() {
   int yMid = TITLE_Y + TITLE_CHAR_H / 2;
   for (int x = TITLE_CLIP_X; x < TITLE_CLIP_X + TITLE_MAX_W; x++) {
@@ -1276,7 +1136,6 @@ void resetTitleMarquee() {
   marqueePhaseStart = millis();
 }
 
-// Draw the current track title: centered if it fits, else clipped + scrolled.
 void drawTitleMarqueeFrame() {
   const char* title = trackNames[currentTrack - 1];
   int fullW = textPixelWidth(title, TITLE_TEXT_SIZE);
@@ -1291,7 +1150,6 @@ void drawTitleMarqueeFrame() {
   gfx->setTextColor(COLOR_BLACK);
   gfx->setTextSize(TITLE_TEXT_SIZE);
   for (int i = 0; title[i]; i++) {
-    // Only draw glyphs fully inside the clip so edges stay clean.
     if (x >= TITLE_CLIP_X && x + charW <= TITLE_CLIP_X + TITLE_MAX_W) {
       gfx->setCursor(x, TITLE_Y);
       gfx->print(title[i]);
@@ -1339,15 +1197,12 @@ void updateTitleMarquee() {
   }
 }
 
-// Stats face: rainbow CD + bare hub. Track above, album below; PLAYS/TIME
-// flank the hub like TRACK/VOL; top artist sits in the bottom footer.
 void drawStatsScreen() {
   drawCdDiscBackground();
   drawHubRing();
 
   drawSpacedCentered("STATS", DISP_CX, 22, 1, 2, COLOR_BLACK);
 
-  // --- Top track (above hub) ---
   drawCenteredText("TOP TRACK", 36, 1, COLOR_BLACK);
   int top = topTrackIndex();
   if (top >= 0 && stats.trackPlays[top] > 0) {
@@ -1359,7 +1214,6 @@ void drawStatsScreen() {
     drawCenteredText("---", 48, 1, COLOR_BLACK);
   }
 
-  // --- PLAYS / TIME stacks (same wedges as TRACK / VOL) ---
   char playsNum[8];
   snprintf(playsNum, sizeof(playsNum), "%lu", (unsigned long)totalPlayCount());
   drawStackedTechLabel(42, DISP_CY, "PLAYS", playsNum);
@@ -1368,7 +1222,6 @@ void drawStatsScreen() {
   formatListenTime(timeBuf, sizeof(timeBuf));
   drawStackedTechLabel(198, DISP_CY, "TIME", timeBuf);
 
-  // --- Top album (below hub, same band as before) ---
   drawCenteredText("TOP ALBUM", 162, 1, COLOR_BLACK);
   const char* albName;
   uint32_t albCount;
@@ -1382,7 +1235,6 @@ void drawStatsScreen() {
     drawCenteredText("---", 174, 1, COLOR_BLACK);
   }
 
-  // --- Top artist (footer where PLAYS/TIME lines used to be) ---
   drawCenteredText("TOP ARTIST", 198, 1, COLOR_BLACK);
   const char* artName;
   uint32_t artCount;
@@ -1397,7 +1249,6 @@ void drawStatsScreen() {
   }
 }
 
-// Full redraw of the CD face for current track/volume/EQ/prev/next.
 void updateDisplay() {
   if (sleepMode) {
     drawSleepCdFace();
@@ -1414,7 +1265,6 @@ void updateDisplay() {
   int prevIdx;
   int nextIdx;
   if (repeatOn) {
-    // Repeat: prev/next both show the track that will play again
     prevIdx = currentTrack - 1;
     nextIdx = currentTrack - 1;
   } else if (shuffleOn) {
@@ -1422,7 +1272,6 @@ void updateDisplay() {
     if (prevIdx + 1 == 33) {
       prevIdx = (prevIdx - 1 + totalTracks) % totalTracks;
     }
-    // Show the pre-picked random upcoming track
     if (shuffleNextTrack < 1 || shuffleNextTrack > totalTracks) {
       pickShuffleNext();
     }
@@ -1430,7 +1279,6 @@ void updateDisplay() {
   } else {
     prevIdx = (currentTrack - 2 + totalTracks) % totalTracks;
     nextIdx = currentTrack % totalTracks;
-    // Skip the missing placeholder in the preview labels
     if (prevIdx + 1 == 33) {
       prevIdx = (prevIdx - 1 + totalTracks) % totalTracks;
     }
@@ -1439,11 +1287,9 @@ void updateDisplay() {
     }
   }
 
-  // Track title large on top (marquee if needed); album smaller underneath
   drawTitleMarqueeFrame();
   drawSizedCentered(albumNames[currentTrack - 1], 72, 1, 140, COLOR_BLACK);
 
-  // Tech stacks flanking the hub
   char trackNum[8];
   snprintf(trackNum, sizeof(trackNum), "%02d", currentTrack);
   drawStackedTechLabel(42, DISP_CY, "TRACK", trackNum);
@@ -1456,7 +1302,6 @@ void updateDisplay() {
     drawStackedTechLabel(198, DISP_CY, "VOL", volNum);
   }
 
-  // PREV: / NEXT: above tapered rules
   char prevLabel[36];
   char nextLabel[36];
   char prevName[24];
