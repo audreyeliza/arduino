@@ -19,6 +19,7 @@
 #include <Arduino_GFX_Library.h>
 #include <Wire.h>
 #include <Preferences.h>
+#include <esp_system.h>
 #include <string.h>
 #include <math.h>
 
@@ -278,6 +279,30 @@ void matrixBegin() {
   matrixTestPattern();
 }
 
+void showResetReason() {
+  esp_reset_reason_t reason = esp_reset_reason();
+  const char* label;
+  uint16_t color;
+  switch (reason) {
+    case ESP_RST_POWERON:   label = "POWERON";   color = RGB565(60, 60, 60);   break;
+    case ESP_RST_BROWNOUT:  label = "BROWNOUT";  color = RGB565(255, 0, 0);    break;
+    case ESP_RST_PANIC:     label = "PANIC";     color = RGB565(255, 0, 0);    break;
+    case ESP_RST_INT_WDT:   label = "INT WDT";   color = RGB565(255, 120, 0);  break;
+    case ESP_RST_TASK_WDT:  label = "TASK WDT";  color = RGB565(255, 120, 0);  break;
+    case ESP_RST_WDT:       label = "WDT";       color = RGB565(255, 120, 0);  break;
+    case ESP_RST_SW:        label = "SW RESET";  color = RGB565(255, 220, 0);  break;
+    case ESP_RST_DEEPSLEEP: label = "DEEPSLEEP"; color = RGB565(0, 150, 255);  break;
+    case ESP_RST_EXT:       label = "EXT/EN";    color = RGB565(0, 150, 255);  break;
+    default:                label = "OTHER";     color = RGB565(150, 150, 150); break;
+  }
+  Serial.print("Reset reason: ");
+  Serial.println(label);
+
+  gfx->fillScreen(color);
+  drawCenteredText(label, DISP_CY - 8, 2, COLOR_BLACK);
+  delay(reason == ESP_RST_POWERON ? 400 : 2000); // linger longer on anything abnormal
+}
+
 void setup() {
   Serial.begin(115200);
   delay(200);
@@ -285,13 +310,13 @@ void setup() {
 
   IrReceiver.begin(IR_RECEIVE_PIN, ENABLE_LED_FEEDBACK);
 
-  matrixBegin();
   randomSeed(millis());
 
   if (!gfx->begin()) {
     Serial.println("Display init failed.");
   } else {
     gfx->fillScreen(COLOR_BLACK);
+    showResetReason();
   }
 
   Serial.println("Initializing DFPlayer...");
@@ -321,6 +346,9 @@ void setup() {
   playTrack(1);
   delay(200);
   dfPlayer.playMp3Folder(currentTrack); // first play often ignored cold
+
+  delay(500); // let playback current settle before the matrix's power-on flash
+  matrixBegin();
 }
 
 void loop() {
